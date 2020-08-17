@@ -110,7 +110,7 @@ ENV/
 env.bak/
 venv.bak/
 
-# Spyder project settings
+# Spyder project settingsß
 .spyderproject
 .spyproject
 
@@ -129,5 +129,7 @@ dmypy.json
 .pyre/
 
 # PyCharm
-
 /.idea
+
+_local_settings.py
+/_local_settings.py
