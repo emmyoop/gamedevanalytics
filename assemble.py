@@ -1,47 +1,57 @@
-import time
 import numpy as np
 import pandas as pd
-import requests
+import sqlalchemy
 
-import json
-from pandas.io.json import json_normalize
+from sqlalchemy.types import Integer, Text, String, DateTime, NVARCHAR
+
+import datetime
+from os import sys
 
 from ast import literal_eval
 
-def load_data(filepath):
-    '''
-    not sure if we actually will need this or not - copied over from notebook
-    :return:
-    '''
-    def try_literal_eval(s):
-        try:
-            return literal_eval(s)
-        except ValueError:
-            return s
+import settings
+import request_data
+import database
+
+# APP_INFO_TABLE = 'dirty_app_info'
+engine, conn = database.open_db_connection()
 
 
-    steam_data = pd.read_csv(filepath)
-    # steam_data = pd.json_normalize(steam_data, errors='ignore')
-    # all columns that are dicts are being read in as strings - look in to json_normalize as possibly better solution?
-    steam_data['price_overview'] = steam_data.price_overview.apply(try_literal_eval)
-    steam_data['platforms'] = steam_data.platforms.apply(try_literal_eval)
-    steam_data['recommendations'] = steam_data.recommendations.apply(try_literal_eval)
-    steam_data['screenshots'] = steam_data.screenshots.apply(try_literal_eval)
-    steam_data['movies'] = steam_data.movies.apply(try_literal_eval)
-    steam_data['genres'] = steam_data.genres.apply(try_literal_eval)
-    steam_data['release_date'] = steam_data.release_date.apply(try_literal_eval)
-    steam_data['fullgame'] = steam_data.fullgame.apply(try_literal_eval)
-    steam_data['demos'] = steam_data.demos.apply(try_literal_eval)
-    steam_data['categories'] = steam_data.categories.apply(try_literal_eval)
-    steam_data['metacritic'] = steam_data.metacritic.apply(try_literal_eval)
-    steam_data['achievements'] = steam_data.achievements.apply(try_literal_eval)
+# def load_data(filepath):
+#     '''
+#     not sure if we actually will need this or not - copied over from notebook
+#     :return:
+#     '''
+#     def try_literal_eval(s):
+#         try:
+#             return literal_eval(s)
+#         except ValueError:
+#             return s
+#
+#
+#     steam_data = pd.read_csv(filepath)
+#     # steam_data = pd.json_normalize(steam_data, errors='ignore')
+#     # all columns that are dicts are being read in as strings - look in to json_normalize as possibly better solution?
+#     steam_data['price_overview'] = steam_data.price_overview.apply(try_literal_eval)
+#     steam_data['platforms'] = steam_data.platforms.apply(try_literal_eval)
+#     steam_data['recommendations'] = steam_data.recommendations.apply(try_literal_eval)
+#     steam_data['screenshots'] = steam_data.screenshots.apply(try_literal_eval)
+#     steam_data['movies'] = steam_data.movies.apply(try_literal_eval)
+#     steam_data['genres'] = steam_data.genres.apply(try_literal_eval)
+#     steam_data['release_date'] = steam_data.release_date.apply(try_literal_eval)
+#     steam_data['fullgame'] = steam_data.fullgame.apply(try_literal_eval)
+#     steam_data['demos'] = steam_data.demos.apply(try_literal_eval)
+#     steam_data['categories'] = steam_data.categories.apply(try_literal_eval)
+#     steam_data['metacritic'] = steam_data.metacritic.apply(try_literal_eval)
+#     steam_data['achievements'] = steam_data.achievements.apply(try_literal_eval)
+#
+#     return steam_data
 
-    return steam_data
 
 # more general functions - maybe pull them out somewhere else?
 def flatten_field(df, field, rename_dict, drops_list):
     '''
-    takes in a dataframe column that is a dict and seprates it into
+    takes in a dataframe column that is a dict and separates it into
     separate columns per key/value pair.  Can rename cols and drop
     columns as specified
 
@@ -55,6 +65,22 @@ def flatten_field(df, field, rename_dict, drops_list):
     df_clean.rename(columns=rename_dict, inplace=True)
 
     return df_clean
+
+
+def list_to_string(df, field):
+    '''
+    takes in a dataframe column that is a list and separates it into
+    just the contents of the list, replacing the original columns.
+
+    df: dataframe to alter
+    field: column to remove list
+    '''
+    df['liststring'] = [','.join(map(str, l)) for l in df[field]]
+
+    df.drop(axis=1, columns=[field], inplace=True)
+    df.rename(columns={'liststring': field}, inplace=True)
+
+    return df
 
 
 def convert_to_datetime(df, col, rename_dict, drops_list):
@@ -121,13 +147,26 @@ def create_unique_bool_cols(df, col, prefix):
     Will use description to build new column name
     '''
     # first we need to create a table of all possible values then store those so we can access them
-    s = df[col].apply(pd.Series)
     # combine everything into single column
-    # todo: add logic to know number of cols on the fly
-    y = s[0].append([s[1], s[2], s[3], s[4], s[5], s[6], s[7], s[8], s[9]], ignore_index=True).dropna()
-    # split out dict to seprate columns
+
+    s = df[col].apply(pd.Series)
+    num_cols = s.shape[1]
+
+    # from pandas docs: Iteratively appending to a Series can be more computationally intensive than a single
+    # concatenate. A better solution is to append values to a list and then concatenate the list with the original
+    # Series all at once.
+    listified = s[0].tolist()
+    for x in range(1, num_cols):
+        sub_list = s[x].dropna().tolist()
+        listified += sub_list
+
+    y = pd.Series(listified)
+
+    y = y.dropna()
+
+    # pull the dict out to columns
     z = y.apply(pd.Series)
-    z = z.drop_duplicates(subset=['id', 'description'], keep="first")
+    z = z.drop_duplicates(keep="first")
 
     # create a new column for each unique value
     for index, row in z.iterrows():
@@ -143,17 +182,85 @@ def create_unique_bool_cols(df, col, prefix):
             # because you can't update on  iterrows()
             df.at[index, new_name] = True
 
-    # drop the original column at the edn of processing
+    # drop the original column at the end of processing
     df.drop(axis=1, columns=col, inplace=True)
 
     return df
 
 
 
+
+def convert_col_to_bool_table(df, col, table_name, replace=False):
+    '''
+    Takes in a single columns in a dataframe, determines all unique values,
+    creates a column for each unique value in the dataframe and fills it
+    with a bool for each row indicating if that values exists for that row.
+
+    Stores this as a tables with steam_appid
+
+    assumes column splits out into ['id','description'] pairs for uniqueness
+
+
+    df: Dataframe
+    col: column to split out into multiple bool columns
+    table_name: table to append new values
+    replace: defaults False - indicates if a table should be replaced or appended
+    Will use description to build new column name
+    '''
+    # first we need to create a table of all possible values then store those so we can access them
+    # combine everything into single column
+
+    new_df = df[['steam_appid', col]].copy()
+
+    s = new_df[col].apply(pd.Series)
+    num_cols = s.shape[1]
+
+    # from pandas docs: Iteratively appending to a Series can be more computationally intensive than a single
+    # concatenate. A better solution is to append values to a list and then concatenate the list with the original
+    # Series all at once.
+    listified = s[0].tolist()
+    for x in range(1, num_cols):
+        sub_list = s[x].dropna().tolist()
+        listified += sub_list
+
+    y = pd.Series(listified)
+
+    y = y.dropna()
+
+    # pull the dict out to columns
+    z = y.apply(pd.Series)
+    z = z.drop_duplicates(keep="first")
+
+    # create a new column for each unique value
+    for index, row in z.iterrows():
+        new_df[row['description']] = False
+
+    # then fill those columns in the Dataframe with bools
+    for index, row in df.iterrows():
+        if type(row[col]) == float:
+            continue
+        for item in row[col]:
+            # because you can't update on  iterrows()
+            new_df.at[index, item['description']] = True
+
+    # drop the original column at the end of processing
+    new_df.drop(axis=1, columns=col, inplace=True)
+    df.drop(axis=1, columns=col, inplace=True)
+
+    #write to table
+    print(new_df.head())
+    print(table_name)
+    # todo: add logic to specify columns to insert into
+    write_to_table(new_df, table_name, replace)
+
+    return df
+
+
 # Steam specific dataset cleaning
-def initial_cleanup(df):
-    del_cols = ['index',
-                'success',
+def initial_cleanup(df, replace=False):
+    del_cols = ['success',
+                'detailed_description',
+                'about_the_game',
                 'header_image',
                 'pc_requirements',
                 'mac_requirements',
@@ -162,7 +269,12 @@ def initial_cleanup(df):
                 'background',
                 'legal_notice',
                 'reviews',
-                'content_descriptors']
+                'content_descriptors',
+
+                'packages',  # is unclear if we want/need this
+                'package_groups', # is unclear if we want/need this
+
+                ]
 
     num_type_list = ['required_age']
 
@@ -174,67 +286,119 @@ def initial_cleanup(df):
     df.set_index('steam_appid')
 
     # remove columns we don't care about
-    df_clean = df.drop(columns=del_cols, axis=1)
+    print('remove columns we dont care about')
+    df_clean = df.drop(columns=del_cols, axis=1, errors='ignore')
 
     # rename columns as appropriate
     df_clean.rename(columns=rename_dict, inplace=True)
 
     # update types to numeric
+    print('update types to numeric')
     for i in num_type_list:
         df_clean[i] = pd.to_numeric(df_clean[i])
 
     # update types to datetime
+    print('update types to datetime')
     df_clean = convert_to_datetime(df_clean, 'release_date', {'date': 'release_date'}, ['release_date'])
 
     # trim down to just below types
+    print('trim down to just below types')
     valid_types = ['game', 'dlc', 'demo']
     df_clean = remove_unused_data(df_clean, 'type', valid_types)
 
     # flatten cols as possible
-    df_clean = flatten_price(df_clean)
-    df_clean = flatten_platform(df_clean)
-    df_clean = flatten_field(df_clean,
-                             'recommendations',
-                             {'total': 'recommendations'},
-                             [0, 'recommendations'])
-    df_clean = flatten_field(df_clean,
+    print('flatten cols as possible')
+    try:
+        df_clean = flatten_field(df_clean,
+                                 'fullgame',
+                                 {'appid': 'fullgame_appid'},
+                                 ['name', 'fullgame'])
+        print(df_clean.info())
+        print(df_clean['fullgame_appid'])
+    except:
+        print('Error flattening {} from dict columns: {}'.format('fullgame', sys.exc_info()[0]))
+        print(df_clean.info())
+
+    try:
+        df_clean = flatten_price(df_clean)
+    except:
+        print('Error flattening {} from dict columns: {}'.format('price', sys.exc_info()[0]))
+
+    try:
+        df_clean = flatten_platform(df_clean)
+    except:
+        print('Error flattening {} from dict columns: {}'.format('platform', sys.exc_info()[0]))
+
+    try:
+        df_clean = flatten_field(df_clean,
+                                 'recommendations',
+                                 {'total': 'recommendations'},
+                                 ['recommendations'])
+    except:
+        print('Error flattening {} from dict columns: {}'.format('recommendations', sys.exc_info()[0]))
+
+    try:
+        df_clean = flatten_field(df_clean,
                              'metacritic',
                              {'score': 'metacritic_score'},
-                             ['metacritic', 0, 'url'])
-    df_clean = flatten_field(df_clean,
-                             'fullgame',
-                             {'appid': 'fullgame_appid'},
-                             ['fullgame', 'name', 0])
-    df_clean = flatten_field(df_clean,
+                             ['metacritic', 'url'])
+    except:
+        print('Error flattening {} from dict columns: {}'.format('metacritic', sys.exc_info()[0]))
+
+    try:
+        df_clean = flatten_field(df_clean,
                              'achievements',
                              {"total": "achievement_count"},
-                             [0, 'achievements', 'highlighted'])
+                             ['achievements', 'highlighted'])
+    except:
+        print('Error flattening {} from dict columns: {}'.format('achievements', sys.exc_info()[0]))
+
+    # convert col of lists to just the string contents
+    df_clean = list_to_string(df_clean, 'developers')
+    df_clean = list_to_string(df_clean, 'publishers')
 
     # there seems to be only 1 demo in the subset i pulled so we'll just show that one demo id instead of the dict
-    s = df_clean['demos'].apply(pd.Series)
-    s['demo_appid'] = s[0].apply(lambda x: str(x['appid']) if not pd.isnull(x) else np.nan)
-    df_clean = pd.concat([df_clean, s['demo_appid']], axis=1)
-    # drop the original column at the edn of processing
-    df_clean.drop(axis=1, columns='demos', inplace=True)
+    try:
+        s = df_clean['demos'].apply(pd.Series)
+        s['demo_appid'] = s[0].apply(lambda x: str(x['appid']) if not pd.isnull(x) else np.nan)
+        df_clean = pd.concat([df_clean, s['demo_appid']], axis=1)
+        # drop the original column at the edn of processing
+        df_clean.drop(axis=1, columns='demos', inplace=True)
+    except:
+        pass
 
     # convert cols to bool type
-    bool_col = 'controller_support'
-    controller_mapping = {np.nan: False, 'full': True}
-    df_clean[bool_col] = map_to_bool(df_clean, controller_mapping, bool_col)
+    try:
+        bool_col = 'controller_support'
+        controller_mapping = {np.nan: False, 'full': True}
+        df_clean[bool_col] = map_to_bool(df_clean, controller_mapping, bool_col)
+    except:
+        pass
 
     # convert cols to just counts
-    df_clean = replace_with_count(df_clean, 'screenshots')
-    df_clean.rename(columns={'screenshots': 'screenshot_count'}, inplace=True)
+    print('convert columns to just counts')
+    try:
+        df_clean = replace_with_count(df_clean, 'screenshots')
+        df_clean.rename(columns={'screenshots': 'screenshot_count'}, inplace=True)
+    except:
+        pass
 
-    df_clean = replace_with_count(df_clean, 'movies')
-    df_clean.rename(columns={'movies': 'movie_count'}, inplace=True)
+    try:
+        df_clean = replace_with_count(df_clean, 'movies')
+        df_clean.rename(columns={'movies': 'movie_count'}, inplace=True)
+    except:
+        pass
 
-    df_clean = replace_with_count(df_clean, 'dlc')
-    df_clean.rename(columns={'dlc': 'dlc_count'}, inplace=True)
+    try:
+        df_clean = replace_with_count(df_clean, 'dlc')
+        df_clean.rename(columns={'dlc': 'dlc_count'}, inplace=True)
+    except:
+        pass
 
     # convert lists to bools for easy categorization
-    df_clean = create_unique_bool_cols(df_clean, 'genres', 'genre')
-    df_clean = create_unique_bool_cols(df_clean, 'categories', 'category')
+    print('convert lists to bools for easy categorization - store in separate tables')
+    df_clean = convert_col_to_bool_table(df_clean, 'genres', settings.GENRES_TABLE, replace)
+    df_clean = convert_col_to_bool_table(df_clean, 'categories', settings.CATEGORIES_TABLE, replace)
 
     return df_clean
 
@@ -266,7 +430,128 @@ def flatten_platform(df):
 
     return df_clean
 
+
+def write_to_table(df, table_name, replace=False):
+    # df.to_csv('placeholder.csv')
+
+    dtypedict = sqlcol(df)
+    # df = df.applymap(str)
+    # print(df.head())
+
+    if replace:
+        if_exists = 'replace'
+    else:
+        if_exists = 'append'
+
+    df.to_sql(
+        name=table_name,
+        con=engine,
+        if_exists=if_exists,  # todo: this is not right, should be append, but leaving replace for testing - if i create
+                              # tables with specific column names it should solve this
+        index=False,
+        dtype=dtypedict
+    )
+
+
+def write_last_update(appid_series, update_date):
+
+    appid_df = pd.read_sql_table(
+            settings.APP_LIST_TABLE,
+            con=engine,
+            columns=[
+                'app_id',
+                'last_update'
+            ],
+            parse_dates=[
+                'last_update'
+            ],
+        )
+
+    # todo: probably a one liner to do below
+    for appid in appid_series:
+        appid_df.loc[appid_df.app_id == appid, 'last_update'] = update_date
+
+    appid_df['last_update'] = pd.to_datetime(appid_df['last_update'])
+
+    appid_df.to_sql(
+            settings.APP_LIST_TABLE,
+            engine,
+            if_exists='replace',
+            index=False,
+            chunksize=10000,
+            dtype={
+                "app_id": Integer,
+                "last_update": DateTime
+            }
+        )
+
+
+def sqlcol(dfparam):
+
+    dtypedict = {}
+    for i,j in zip(dfparam.columns, dfparam.dtypes):
+        print(i)
+        if "object" in str(j):
+            dtypedict.update({i: sqlalchemy.types.TEXT})
+
+        elif "datetime" in str(j):
+            dtypedict.update({i: sqlalchemy.types.DateTime()})
+
+        elif "float" in str(j):
+            dtypedict.update({i: sqlalchemy.types.Float(precision=3, asdecimal=True)})
+
+        elif "int" in str(j):
+            dtypedict.update({i: sqlalchemy.types.INT()})
+
+        elif "bool" in str(j):
+            dtypedict.update({i: sqlalchemy.types.Boolean()})
+
+        else:
+            dtypedict.update({i: sqlalchemy.types.NVARCHAR(length=255)})
+
+    #todo: print this out for now so i can capture column names/types and build a constant definition
+    print(dtypedict)
+    return dtypedict
+
+
+def build_new_tables():
+
+    print('Build new app list')
+    request_data.update_applist(replace_table=True)
+
+    print('Get raw app info')
+    raw_app_data = request_data.retrieve_app_data(20)
+    print(raw_app_data.info())
+
+    print('clean up data for table insertion')
+    parsed_data = initial_cleanup(raw_app_data, replace=True)
+
+    print('write to table')
+    # todo: add logic to specify columns to insert into
+    write_to_table(parsed_data, settings.APP_INFO_TABLE, replace=True)
+
+    print('updating app list for last update')
+    today = datetime.date.today()
+    write_last_update(parsed_data['steam_appid'], today)
+
+
+def update_existing_tables():
+
+    print('Get raw app info')
+    raw_app_data = request_data.retrieve_app_data(20)
+    print(raw_app_data.info())
+
+    print('clean up data for table insertion')
+    parsed_data = initial_cleanup(raw_app_data)
+
+    print('write to table')
+    write_to_table(parsed_data, settings.APP_INFO_TABLE, replace=False)
+
+    print('updating app list for last update')
+    today = datetime.date.today()
+    write_last_update(parsed_data['steam_appid'], today)
+
+
 if __name__ == "__main__":
-    steam_data = load_data('initial_preprocessed.csv')
-    data1 = initial_cleanup(steam_data)
-    data1.to_csv('consolidated_processed.csv', index=False)
+    # build_new_tables()
+    update_existing_tables()
