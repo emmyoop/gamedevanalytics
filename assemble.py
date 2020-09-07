@@ -188,8 +188,6 @@ def create_unique_bool_cols(df, col, prefix):
     return df
 
 
-
-
 def convert_col_to_bool_table(df, col, table_name, replace=False):
     '''
     Takes in a single columns in a dataframe, determines all unique values,
@@ -229,11 +227,21 @@ def convert_col_to_bool_table(df, col, table_name, replace=False):
 
     # pull the dict out to columns
     z = y.apply(pd.Series)
+
     z = z.drop_duplicates(keep="first")
 
+    # build df of current table columns
+    if engine.has_table(table_name):
+        boolean_df = pd.read_sql_table(
+            table_name,
+            con=engine,
+        )
+
+    combined_column_list = list(set().union(z.description.tolist(), boolean_df.columns.tolist()))
+
     # create a new column for each unique value
-    for index, row in z.iterrows():
-        new_df[row['description']] = False
+    for description in combined_column_list:
+        new_df[description] = False
 
     # then fill those columns in the Dataframe with bools
     for index, row in df.iterrows():
@@ -243,15 +251,17 @@ def convert_col_to_bool_table(df, col, table_name, replace=False):
             # because you can't update on  iterrows()
             new_df.at[index, item['description']] = True
 
+    # drop any rows in the existing data that are being updated by the new df
+    boolean_df = boolean_df[~boolean_df['steam_appid'].isin(new_df['steam_appid'])]
+
+    # append the old dataframe onto the new, filling in False for any extra columns
+    df_append = new_df.append(boolean_df, verify_integrity=True).fillna(False)
+
     # drop the original column at the end of processing
-    new_df.drop(axis=1, columns=col, inplace=True)
+    df_append.drop(axis=1, columns=col, inplace=True)
     df.drop(axis=1, columns=col, inplace=True)
 
-    #write to table
-    print(new_df.head())
-    print(table_name)
-    # todo: add logic to specify columns to insert into
-    write_to_table(new_df, table_name, replace)
+    write_to_table(df_append, table_name, True)
 
     return df
 
@@ -514,13 +524,13 @@ def sqlcol(dfparam):
     return dtypedict
 
 
-def build_new_tables():
+def build_new_tables(records=20):
 
     print('Build new app list')
     request_data.update_applist(replace_table=True)
 
     print('Get raw app info')
-    raw_app_data = request_data.retrieve_app_data(20)
+    raw_app_data = request_data.retrieve_app_data(records)
     print(raw_app_data.info())
 
     print('clean up data for table insertion')
@@ -535,10 +545,10 @@ def build_new_tables():
     write_last_update(parsed_data['steam_appid'], today)
 
 
-def update_existing_tables():
+def update_existing_tables(records=20):
 
     print('Get raw app info')
-    raw_app_data = request_data.retrieve_app_data(20)
+    raw_app_data = request_data.retrieve_app_data(records)
     print(raw_app_data.info())
 
     print('clean up data for table insertion')
@@ -554,4 +564,4 @@ def update_existing_tables():
 
 if __name__ == "__main__":
     # build_new_tables()
-    update_existing_tables()
+    build_new_tables(1000)
