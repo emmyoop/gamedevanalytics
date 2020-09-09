@@ -10,12 +10,14 @@ FAILURE_FILE = 'response/failure.json'
 
 INITIAL_DATAFRAME = 'processed/inital_structure.json'
 
-APP_INFO_TABLE = 'dirty_app_info'
-APP_LIST_TABLE = 'app_list'
-SUCCESS_TABLE = 'app_info'
-FAILURE_TABLE = 'request_failure'
-GENRES_TABLE = 'genre'
-CATEGORIES_TABLE = 'category'
+Database_Tables = {
+                'APP_INFO_TABLE': 'dirty_app_info',
+                'APP_LIST_TABLE': 'app_list',
+                'SUCCESS_TABLE': 'app_info',
+                'FAILURE_TABLE': 'request_failure',
+                'GENRES_TABLE': 'genre',
+                'CATEGORIES_TABLE': 'category'
+}
 
 # API URLs
 ALL_APPS_URL = "http://api.steampowered.com/ISteamApps/GetAppList/v0002/?key=STEAMKEY&format=json"

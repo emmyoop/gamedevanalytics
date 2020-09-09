@@ -125,7 +125,7 @@ def get_request(url, parameters=None):
 #             file.write(",")  # add comma for JSON array element
 
 
-def get_unprocessed_applist(since_date=datetime.date.today()):
+def get_unprocessed_applist(since_date):
     '''
     Gets the list of all steam app ids that have not been processed since a given date, or have never been processed
 
@@ -133,7 +133,7 @@ def get_unprocessed_applist(since_date=datetime.date.today()):
     '''
 
     query_string = "SELECT * FROM {table} WHERE last_update < CAST('{query_date}' AS DATETIME) OR last_update IS NULL".format(
-        table=settings.APP_LIST_TABLE,
+        table=settings.Database_Tables['APP_LIST_TABLE'],
         query_date=since_date
     )
 
@@ -164,9 +164,9 @@ def update_applist(replace_table=False):
 
     all_apps = get_request(ALL_APPS_URL)
 
-    if engine.has_table(settings.APP_LIST_TABLE) and not replace_table:
+    if engine.has_table(settings.Database_Tables['APP_LIST_TABLE']) and not replace_table:
         appid_dict_list = pd.read_sql_table(
-            settings.APP_LIST_TABLE,
+            settings.Database_Tables['APP_LIST_TABLE'],
             con=engine,
             columns=[
                 'app_id',
@@ -196,7 +196,7 @@ def update_applist(replace_table=False):
     app_list_df['last_update'] = pd.to_datetime(app_list_df['last_update'])
 
     app_list_df.to_sql(
-        settings.APP_LIST_TABLE,
+        settings.Database_Tables['APP_LIST_TABLE'],
         engine,
         if_exists='replace',
         index=False,
@@ -208,9 +208,9 @@ def update_applist(replace_table=False):
     )
 
 
-def retrieve_app_data(limit=500):  #todo: converting to function
+def retrieve_app_data(since_date=datetime.date.today(), limit=500):  #todo: converting to function
 
-    unprocessed_appids = get_unprocessed_applist()
+    unprocessed_appids = get_unprocessed_applist(since_date)
     all_apps, failed_apps = get_app_info(unprocessed_appids, limit=limit)
 
     return all_apps

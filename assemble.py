@@ -1,8 +1,9 @@
 import numpy as np
 import pandas as pd
 import sqlalchemy
+import math
 
-from sqlalchemy.types import Integer, Text, String, DateTime, NVARCHAR
+from sqlalchemy.types import Integer, Text, Boolean, DateTime, NVARCHAR, Float
 
 import datetime
 from os import sys
@@ -16,6 +17,44 @@ import database
 # APP_INFO_TABLE = 'dirty_app_info'
 engine, conn = database.open_db_connection()
 
+
+raw_data_dtype={
+ 'type': NVARCHAR(256),
+ 'name': NVARCHAR(256),
+ 'steam_appid': Integer,
+ 'required_age': Integer,
+ 'is_free': Boolean,
+ 'detailed_description': Text,
+ 'about_the_game': Text,
+ 'short_description': Text,
+ 'supported_languages': Text,
+ 'website': Text,
+ 'developers': Text,
+ 'publishers': Text,
+ 'dlc': Text,
+ 'controller_support': Boolean,
+ 'achievements': NVARCHAR(256),
+ 'drm_notice': Text,
+ 'ext_user_account_notice': Text,
+ 'price_currency': NVARCHAR(256),
+ 'price_discount_percent': Float,
+ 'price_final': Float,
+ 'price_initial': Float,
+ 'price_recurring_sub': Float,
+ 'price_recurring_sub_desc': Text,
+ 'windows_support': Boolean,
+ 'mac_support': Boolean,
+ 'linux_support': Boolean,
+ 'recommendations': Float,
+ 'screenshot_count': Float,
+ 'movie_count': Float,
+ 'coming_soon': Boolean,
+ 'release_date': DateTime,
+ 'fullgame_appid': NVARCHAR(256),
+ 'demo_appid': NVARCHAR(256),
+ 'dlc_count': Integer,
+ 'metacritic_score': Float
+            }
 
 # def load_data(filepath):
 #     '''
@@ -188,7 +227,7 @@ def create_unique_bool_cols(df, col, prefix):
     return df
 
 
-def convert_col_to_bool_table(df, col, table_name, replace=False):
+def convert_col_to_bool_table(df, col, table_name):
     '''
     Takes in a single columns in a dataframe, determines all unique values,
     creates a column for each unique value in the dataframe and fills it
@@ -202,7 +241,6 @@ def convert_col_to_bool_table(df, col, table_name, replace=False):
     df: Dataframe
     col: column to split out into multiple bool columns
     table_name: table to append new values
-    replace: defaults False - indicates if a table should be replaced or appended
     Will use description to build new column name
     '''
     # first we need to create a table of all possible values then store those so we can access them
@@ -236,12 +274,14 @@ def convert_col_to_bool_table(df, col, table_name, replace=False):
             table_name,
             con=engine,
         )
-
-    combined_column_list = list(set().union(z.description.tolist(), boolean_df.columns.tolist()))
+    # drop any rows in the existing data that are being updated by the new df
+        boolean_df = boolean_df[~boolean_df['steam_appid'].isin(new_df['steam_appid'])]
+    else:
+        boolean_df = pd.DataFrame()
 
     # create a new column for each unique value
-    for description in combined_column_list:
-        new_df[description] = False
+    for index, row in z.iterrows():
+        new_df[row['description']] = False
 
     # then fill those columns in the Dataframe with bools
     for index, row in df.iterrows():
@@ -251,9 +291,6 @@ def convert_col_to_bool_table(df, col, table_name, replace=False):
             # because you can't update on  iterrows()
             new_df.at[index, item['description']] = True
 
-    # drop any rows in the existing data that are being updated by the new df
-    boolean_df = boolean_df[~boolean_df['steam_appid'].isin(new_df['steam_appid'])]
-
     # append the old dataframe onto the new, filling in False for any extra columns
     df_append = new_df.append(boolean_df, verify_integrity=True).fillna(False)
 
@@ -261,7 +298,7 @@ def convert_col_to_bool_table(df, col, table_name, replace=False):
     df_append.drop(axis=1, columns=col, inplace=True)
     df.drop(axis=1, columns=col, inplace=True)
 
-    write_to_table(df_append, table_name, True)
+    write_to_table(df_append, table_name, replace=True)
 
     return df
 
@@ -283,6 +320,8 @@ def initial_cleanup(df, replace=False):
 
                 'packages',  # is unclear if we want/need this
                 'package_groups', # is unclear if we want/need this
+
+                'ext_user_account_notice'
 
                 ]
 
@@ -364,9 +403,21 @@ def initial_cleanup(df, replace=False):
         print('Error flattening {} from dict columns: {}'.format('achievements', sys.exc_info()[0]))
 
     # convert col of lists to just the string contents
-    df_clean = list_to_string(df_clean, 'developers')
-    df_clean = list_to_string(df_clean, 'publishers')
+    # todo: not sure this is really how we want to handle errors!?
+    print('developers to string')
+    try:
+        df_clean = list_to_string(df_clean, 'developers')
+    except:
+        print('failed to convert developer column, blanking out data')
+        df_clean['developers'] = np.nan
+    print('publishers to string')
+    try:
+        df_clean = list_to_string(df_clean, 'publishers')
+    except:
+        print('failed to convert publishers column, blanking out data')
+        df_clean['publishers'] = np.nan
 
+    print('pull demo id')
     # there seems to be only 1 demo in the subset i pulled so we'll just show that one demo id instead of the dict
     try:
         s = df_clean['demos'].apply(pd.Series)
@@ -407,20 +458,21 @@ def initial_cleanup(df, replace=False):
 
     # convert lists to bools for easy categorization
     print('convert lists to bools for easy categorization - store in separate tables')
-    df_clean = convert_col_to_bool_table(df_clean, 'genres', settings.GENRES_TABLE, replace)
-    df_clean = convert_col_to_bool_table(df_clean, 'categories', settings.CATEGORIES_TABLE, replace)
+    df_clean = convert_col_to_bool_table(df_clean, 'genres', settings.Database_Tables['GENRES_TABLE'])
+    df_clean = convert_col_to_bool_table(df_clean, 'categories', settings.Database_Tables['CATEGORIES_TABLE'])
+
+    df_clean = df_clean.drop(columns=['0'], axis=1, errors='ignore')
 
     return df_clean
 
 
 def flatten_price(df):
+
     field_to_rename = {'currency': 'price_currency',
                        'discount_percent': 'price_discount_percent',
                        'final': 'price_final',
-                       'initial': 'price_initial',
-                       'recurring_sub': 'price_recurring_sub',
-                       'recurring_sub_desc': 'price_recurring_sub_desc'}
-    fields_to_drop = ['price_overview', 0, 'final_formatted', 'initial_formatted']
+                       'initial': 'price_initial'}
+    fields_to_drop = ['price_overview', 'final_formatted', 'initial_formatted']
 
     df_clean = flatten_field(df, 'price_overview', field_to_rename, fields_to_drop)
 
@@ -441,10 +493,12 @@ def flatten_platform(df):
     return df_clean
 
 
-def write_to_table(df, table_name, replace=False):
+def write_to_table(df, table_name, replace=False, table_dtype=None):
     # df.to_csv('placeholder.csv')
 
-    dtypedict = sqlcol(df)
+    if table_dtype == None:
+        table_dtype = sqlcol(df)
+
     # df = df.applymap(str)
     # print(df.head())
 
@@ -459,14 +513,14 @@ def write_to_table(df, table_name, replace=False):
         if_exists=if_exists,  # todo: this is not right, should be append, but leaving replace for testing - if i create
                               # tables with specific column names it should solve this
         index=False,
-        dtype=dtypedict
+        dtype=table_dtype
     )
 
 
 def write_last_update(appid_series, update_date):
 
     appid_df = pd.read_sql_table(
-            settings.APP_LIST_TABLE,
+            settings.Database_Tables['APP_LIST_TABLE'],
             con=engine,
             columns=[
                 'app_id',
@@ -484,7 +538,7 @@ def write_last_update(appid_series, update_date):
     appid_df['last_update'] = pd.to_datetime(appid_df['last_update'])
 
     appid_df.to_sql(
-            settings.APP_LIST_TABLE,
+            settings.Database_Tables['APP_LIST_TABLE'],
             engine,
             if_exists='replace',
             index=False,
@@ -526,42 +580,58 @@ def sqlcol(dfparam):
 
 def build_new_tables(records=20):
 
+    print('drop all tables')
+    connection = engine.raw_connection()
+    cursor = connection.cursor()
+    for k,v in settings.Database_Tables.items():
+        command = "DROP TABLE IF EXISTS {};".format(v)
+    cursor.execute(command)
+    connection.commit()
+    cursor.close()
+
     print('Build new app list')
     request_data.update_applist(replace_table=True)
 
-    print('Get raw app info')
-    raw_app_data = request_data.retrieve_app_data(records)
-    print(raw_app_data.info())
-
-    print('clean up data for table insertion')
-    parsed_data = initial_cleanup(raw_app_data, replace=True)
-
-    print('write to table')
-    # todo: add logic to specify columns to insert into
-    write_to_table(parsed_data, settings.APP_INFO_TABLE, replace=True)
-
-    print('updating app list for last update')
-    today = datetime.date.today()
-    write_last_update(parsed_data['steam_appid'], today)
+    loop_through_records(datetime.date.today(), records)
 
 
-def update_existing_tables(records=20):
+def loop_through_records(since_date, records=20):
+    '''
 
-    print('Get raw app info')
-    raw_app_data = request_data.retrieve_app_data(records)
-    print(raw_app_data.info())
+    :param since_date: date appid was last processed - generally today but this allow to
+                        rerun for failed processing on other days
+    records: number of records total to process
+    :return: none
+    '''
 
-    print('clean up data for table insertion')
-    parsed_data = initial_cleanup(raw_app_data)
+    if records > 1000:
+        chunksize = 1000
+    else:
+        chunksize = records
 
-    print('write to table')
-    write_to_table(parsed_data, settings.APP_INFO_TABLE, replace=False)
+    for i in range(1,math.ceil(records/chunksize)):
 
-    print('updating app list for last update')
-    today = datetime.date.today()
-    write_last_update(parsed_data['steam_appid'], today)
+        print('Get raw app info')
+        raw_app_data = request_data.retrieve_app_data(since_date, chunksize)
+        print(raw_app_data.info())
+
+        print('clean up data for table insertion')
+        parsed_data = initial_cleanup(raw_app_data, replace=True)
+
+        print('write to table')
+        write_to_table(parsed_data, settings.Database_Tables['APP_INFO_TABLE'], replace=False, table_dtype=raw_data_dtype)
+
+        print('updating app list for last update')
+        today = datetime.date.today()
+        write_last_update(parsed_data['steam_appid'], today)
+
+def update_existing_tables(since_date=datetime.date.today(), records=20):
+
+    loop_through_records(since_date, records)
 
 
 if __name__ == "__main__":
     # build_new_tables()
-    build_new_tables(1000)
+    # build_new_tables(100)
+
+    update_existing_tables(records=10000)
