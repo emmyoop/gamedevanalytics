@@ -20,28 +20,26 @@ engine, conn = database.open_db_connection()
 
 raw_data_dtype={
  'type': NVARCHAR(256),
- 'name': NVARCHAR(256),
+ 'game_name': NVARCHAR(256),
  'steam_appid': Integer,
  'required_age': Integer,
  'is_free': Boolean,
- 'detailed_description': Text,
- 'about_the_game': Text,
  'short_description': Text,
  'supported_languages': Text,
  'website': Text,
  'developers': Text,
  'publishers': Text,
- 'dlc': Text,
+ # 'dlc': Text,
  'controller_support': Boolean,
- 'achievements': NVARCHAR(256),
+ 'achievement_count': NVARCHAR(256),
  'drm_notice': Text,
  'ext_user_account_notice': Text,
  'price_currency': NVARCHAR(256),
  'price_discount_percent': Float,
  'price_final': Float,
  'price_initial': Float,
- 'price_recurring_sub': Float,
- 'price_recurring_sub_desc': Text,
+ # 'price_recurring_sub': Float,
+ # 'price_recurring_sub_desc': Text,
  'windows_support': Boolean,
  'mac_support': Boolean,
  'linux_support': Boolean,
@@ -99,9 +97,15 @@ def flatten_field(df, field, rename_dict, drops_list):
     rename_dict: dictionary of current_name: new_name pairs for updating
     drops_list: list of new columns to drop
     '''
-    df_clean = pd.concat([df, df[field].apply(pd.Series)], axis=1)
-    df_clean.drop(axis=1, columns=drops_list, inplace=True)
-    df_clean.rename(columns=rename_dict, inplace=True)
+    if df[field].dropna().empty:
+        print(field + ' column was empty')
+        df_clean = df.drop(axis=1, columns=drops_list)
+        df_clean.rename(columns=rename_dict, inplace=True)
+
+    else:
+        df_clean = pd.concat([df, df[field].apply(pd.Series)], axis=1)
+        df_clean.drop(axis=1, columns=drops_list, inplace=True)
+        df_clean.rename(columns=rename_dict, inplace=True)
 
     return df_clean
 
@@ -114,6 +118,10 @@ def list_to_string(df, field):
     df: dataframe to alter
     field: column to remove list
     '''
+    if df[field].dropna().empty:
+        print(field + ' column was empty')
+        return df
+
     df['liststring'] = [','.join(map(str, l)) for l in df[field]]
 
     df.drop(axis=1, columns=[field], inplace=True)
@@ -163,9 +171,11 @@ def replace_with_count(df, col):
     '''
     gets the length of a column that is of type list
     '''
+    if df[col].dropna().empty:
+        return df
     df = pd.concat([df, df[col].str.len()], axis=1)
     # this results in both old and new columns having the same name
-    # so below code will remove the old screenshots dictionary column
+    # so below code will remove the original column
     df = df.loc[:, ~df.columns.duplicated(keep='last')]
     return df
 
@@ -246,9 +256,16 @@ def convert_col_to_bool_table(df, col, table_name):
     # first we need to create a table of all possible values then store those so we can access them
     # combine everything into single column
 
+    if col not in df.columns:
+        return df
+
     new_df = df[['steam_appid', col]].copy()
 
     s = new_df[col].apply(pd.Series)
+    if s.empty:
+        print('Column ' + col + ' is empty.')
+        df.drop(axis=1, columns=col, inplace=True)
+        return df
     num_cols = s.shape[1]
 
     # from pandas docs: Iteratively appending to a Series can be more computationally intensive than a single
@@ -305,6 +322,7 @@ def convert_col_to_bool_table(df, col, table_name):
 
 # Steam specific dataset cleaning
 def initial_cleanup(df, replace=False):
+
     del_cols = ['success',
                 'detailed_description',
                 'about_the_game',
@@ -355,6 +373,13 @@ def initial_cleanup(df, replace=False):
     valid_types = ['game', 'dlc', 'demo']
     df_clean = remove_unused_data(df_clean, 'type', valid_types)
 
+    if df_clean.empty:
+        print('no relevant types, stop processing batch')
+        return df_clean
+
+    print(df_clean.head)
+    print("Pre processed Dataframe size: " + str(df_clean.shape))
+
     # flatten cols as possible
     print('flatten cols as possible')
     try:
@@ -362,11 +387,8 @@ def initial_cleanup(df, replace=False):
                                  'fullgame',
                                  {'appid': 'fullgame_appid'},
                                  ['name', 'fullgame'])
-        print(df_clean.info())
-        print(df_clean['fullgame_appid'])
     except:
         print('Error flattening {} from dict columns: {}'.format('fullgame', sys.exc_info()[0]))
-        print(df_clean.info())
 
     try:
         df_clean = flatten_price(df_clean)
@@ -420,13 +442,17 @@ def initial_cleanup(df, replace=False):
     print('pull demo id')
     # there seems to be only 1 demo in the subset i pulled so we'll just show that one demo id instead of the dict
     try:
-        s = df_clean['demos'].apply(pd.Series)
-        s['demo_appid'] = s[0].apply(lambda x: str(x['appid']) if not pd.isnull(x) else np.nan)
-        df_clean = pd.concat([df_clean, s['demo_appid']], axis=1)
-        # drop the original column at the edn of processing
-        df_clean.drop(axis=1, columns='demos', inplace=True)
+        if df_clean['demos'].dropna().empty:
+            print('demos column was empty')
+            df_clean.rename(columns={'demos': 'demo_appid'}, inplace=True)
+        else:
+            s = df_clean['demos'].apply(pd.Series)
+            s['demo_appid'] = s[0].apply(lambda x: str(x['appid']) if not pd.isnull(x) else np.nan)
+            df_clean = pd.concat([df_clean, s['demo_appid']], axis=1)
+            # drop the original column at the edn of processing
+            df_clean.drop(axis=1, columns='demos', inplace=True)
     except:
-        pass
+        print('Error with column {}: {}'.format('demos', sys.exc_info()[0]))
 
     # convert cols to bool type
     try:
@@ -434,7 +460,7 @@ def initial_cleanup(df, replace=False):
         controller_mapping = {np.nan: False, 'full': True}
         df_clean[bool_col] = map_to_bool(df_clean, controller_mapping, bool_col)
     except:
-        pass
+        print('Error with column {}: {}'.format('controller_support', sys.exc_info()[0]))
 
     # convert cols to just counts
     print('convert columns to just counts')
@@ -442,26 +468,41 @@ def initial_cleanup(df, replace=False):
         df_clean = replace_with_count(df_clean, 'screenshots')
         df_clean.rename(columns={'screenshots': 'screenshot_count'}, inplace=True)
     except:
-        pass
+        print('Error with column {}: {}'.format('screenshots', sys.exc_info()[0]))
 
     try:
         df_clean = replace_with_count(df_clean, 'movies')
         df_clean.rename(columns={'movies': 'movie_count'}, inplace=True)
     except:
-        pass
+        print('Error with column {}: {}'.format('movies', sys.exc_info()[0]))
 
     try:
         df_clean = replace_with_count(df_clean, 'dlc')
         df_clean.rename(columns={'dlc': 'dlc_count'}, inplace=True)
     except:
-        pass
+        print('Error with column {}: {}'.format('dlc', sys.exc_info()[0]))
 
     # convert lists to bools for easy categorization
     print('convert lists to bools for easy categorization - store in separate tables')
     df_clean = convert_col_to_bool_table(df_clean, 'genres', settings.Database_Tables['GENRES_TABLE'])
     df_clean = convert_col_to_bool_table(df_clean, 'categories', settings.Database_Tables['CATEGORIES_TABLE'])
 
-    df_clean = df_clean.drop(columns=['0'], axis=1, errors='ignore')
+    df_clean = df_clean.drop(columns=[0], axis=1, errors='ignore')
+
+    print('*** Dataframe columns***')
+    print(df_clean.columns)
+    for k, v in raw_data_dtype.items():
+        if k not in df_clean.columns:
+            print(k + ' not in dataframe, adding it')
+            df_clean[k] = np.nan
+
+    print('checking for extra columns and dropping them')
+    extra = []
+    for col in df_clean.columns:
+        if col not in raw_data_dtype:
+            print(str(col) + ' is extra column that should not exist')
+            extra.append(col)
+    df_clean = df_clean.drop(columns=extra, axis=1)
 
     return df_clean
 
@@ -494,13 +535,11 @@ def flatten_platform(df):
 
 
 def write_to_table(df, table_name, replace=False, table_dtype=None):
-    # df.to_csv('placeholder.csv')
+    # todo: need to add logic for main data store to store this to a temp table then do a join on the permenant and temp
+    #  table so that we can update any records that are new
 
     if table_dtype == None:
         table_dtype = sqlcol(df)
-
-    # df = df.applymap(str)
-    # print(df.head())
 
     if replace:
         if_exists = 'replace'
@@ -554,7 +593,6 @@ def sqlcol(dfparam):
 
     dtypedict = {}
     for i,j in zip(dfparam.columns, dfparam.dtypes):
-        print(i)
         if "object" in str(j):
             dtypedict.update({i: sqlalchemy.types.TEXT})
 
@@ -573,12 +611,10 @@ def sqlcol(dfparam):
         else:
             dtypedict.update({i: sqlalchemy.types.NVARCHAR(length=255)})
 
-    #todo: print this out for now so i can capture column names/types and build a constant definition
-    print(dtypedict)
     return dtypedict
 
 
-def build_new_tables(records=20):
+def build_new_tables(chunks=1000, records=20):
 
     print('drop all tables')
     connection = engine.raw_connection()
@@ -592,10 +628,10 @@ def build_new_tables(records=20):
     print('Build new app list')
     request_data.update_applist(replace_table=True)
 
-    loop_through_records(datetime.date.today(), records)
+    loop_through_records(datetime.date.today(), chunks, records)
 
 
-def loop_through_records(since_date, records=20):
+def loop_through_records(since_date, chunks, records=20):
     '''
 
     :param since_date: date appid was last processed - generally today but this allow to
@@ -604,34 +640,42 @@ def loop_through_records(since_date, records=20):
     :return: none
     '''
 
-    if records > 1000:
-        chunksize = 1000
+    if records > chunks:
+        chunksize = chunks
     else:
         chunksize = records
 
-    for i in range(1,math.ceil(records/chunksize)):
+    for i in range(0,math.ceil(records/chunksize)):
+        print('iteration ' + str(i+1))
 
         print('Get raw app info')
         raw_app_data = request_data.retrieve_app_data(since_date, chunksize)
-        print(raw_app_data.info())
 
         print('clean up data for table insertion')
         parsed_data = initial_cleanup(raw_app_data, replace=True)
 
-        print('write to table')
-        write_to_table(parsed_data, settings.Database_Tables['APP_INFO_TABLE'], replace=False, table_dtype=raw_data_dtype)
+        if parsed_data.empty:
+            print('**************Empty dataset, nothing to write to tables**************')
+        else:
+            print('write to table')
+            write_to_table(parsed_data, settings.Database_Tables['APP_INFO_TABLE'], replace=False, table_dtype=raw_data_dtype)
 
         print('updating app list for last update')
         today = datetime.date.today()
         write_last_update(parsed_data['steam_appid'], today)
 
-def update_existing_tables(since_date=datetime.date.today(), records=20):
+def update_existing_tables(since_date=datetime.date.today(), chunks=1000, records=20):
 
-    loop_through_records(since_date, records)
+    #todo: query
+    loop_through_records(since_date, chunks, records)
 
 
 if __name__ == "__main__":
     # build_new_tables()
-    # build_new_tables(100)
+    build_new_tables(chunks=50, records=1500)
 
-    update_existing_tables(records=10000)
+
+    # yesterday = datetime.date.today() - datetime.timedelta(days=1)
+
+    # update_existing_tables(since_date=yesterday,chunks=50, records=1500)
+
